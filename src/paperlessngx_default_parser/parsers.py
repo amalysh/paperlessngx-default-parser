@@ -58,6 +58,8 @@ class DefaultDocumentParser(DocumentParser):
     )
 
     def __init__(self, logging_group: object = None) -> None:
+        # sets self.log, which DocumentParser.__init__ would do
+        self.renew_logging_group()
         settings.SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
         self._tempdir = Path(
             tempfile.mkdtemp(prefix="paperless-", dir=settings.SCRATCH_DIR)
