@@ -12,6 +12,20 @@ If a file with known encoding is parsed, the content of this file is read and st
 
     Download original file to work with it.
 
+## Archives
+For archives the names of the contained entries are stored in the document's content metadata, so documents can be found by the names of the files inside an archive. The generated PDF lists the entries with their size and modification date. Archives are never extracted, only their table of contents is read.
+
+Supported formats:
+
+| Format | Mime types |
+|---|---|
+| ZIP | application/zip, application/x-zip-compressed |
+| tar (uncompressed, gzip, bzip2, xz) | application/x-tar, application/gzip, application/x-gzip, application/x-bzip2, application/x-xz |
+
+If an archive can't be read (e.g. it is corrupt, or a .gz file contains a single compressed file instead of a tar archive) it is archived like any other file.
+
+Support for further formats can be added in `content_listers.py`: write a function returning the entries of a file and register it for the format's mime types in `CONTENT_LISTERS`.
+
 ## Prerequisites
 This parser requires Gotenberg to be configured for Paperless-ngx.
 
