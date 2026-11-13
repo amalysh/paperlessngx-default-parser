@@ -31,16 +31,37 @@ def test_zip_lists_files_and_directories(tmp_path: Path):
     assert entries[1].modified == datetime(2020, 5, 17, 10, 30, 0)
 
 
-def test_zip_decodes_names_without_utf8_flag_as_cp437(tmp_path: Path):
-    # zipfile always writes non-ASCII names as UTF-8, so patch a CP437 name in
-    # like older Windows archivers write it
+def zip_with_raw_names(path: Path, raw_names: list[bytes]) -> Path:
+    # zipfile always writes non-ASCII names as UTF-8, so patch the raw names in
+    # (without the UTF-8 flag) like Windows programs write them
+    # a different letter per name, so no placeholder contains another one
+    placeholders = [chr(ord("A") + index).encode() * len(raw) for index, raw in enumerate(raw_names)]
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr("Xnderung.txt", "content")
-    path = tmp_path / "cp437.zip"
-    path.write_bytes(buffer.getvalue().replace(b"Xnderung", "Änderung".encode("cp437")))
+        for placeholder in placeholders:
+            archive.writestr(placeholder.decode(), "x")
+    data = buffer.getvalue()
+    for placeholder, raw in zip(placeholders, raw_names):
+        data = data.replace(placeholder, raw)
+    path.write_bytes(data)
+    return path
 
-    assert [entry.name for entry in list_zip(path)] == ["Änderung.txt"]
+
+@pytest.mark.parametrize(
+    ("encoding", "names"),
+    [
+        # names as written by older DOS/Windows archivers following the ZIP spec
+        ("cp437", ["Änderung.txt", "Übersicht Konten.xlsx"]),
+        ("cp437", ["Grüße.txt"]),
+        # names in the Windows ANSI code page, e.g. from Windows backup tools
+        ("cp1252", ["Antrag auf schlichte Änderung - 2020.rtf", "EÜR Gewerbe.pdf"]),
+        ("cp1252", ["Größe.txt", "Café.txt"]),
+    ],
+)
+def test_zip_decodes_names_without_utf8_flag(tmp_path: Path, encoding: str, names: list[str]):
+    path = zip_with_raw_names(tmp_path / "legacy.zip", [name.encode(encoding) for name in names])
+
+    assert [entry.name for entry in list_zip(path)] == names
 
 
 def test_zip_lists_names_of_encrypted_archive(tmp_path: Path):

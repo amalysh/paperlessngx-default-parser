@@ -11,6 +11,7 @@ types in CONTENT_LISTERS together with the default file extension.
 """
 
 import tarfile
+import unicodedata
 import zipfile
 from collections.abc import Callable
 from datetime import datetime
@@ -45,22 +46,63 @@ def _tar_timestamp(mtime: float) -> datetime | None:
         return None
 
 
+def _unlikely_chars(name: str) -> int:
+    # e.g. box drawing characters, which CP437 yields for names in Windows-1252
+    return sum(
+        1
+        for char in name
+        if not char.isascii() and not unicodedata.name(char, "").startswith("LATIN")
+    )
+
+
+def _legacy_zip_encoding(raw_names: list[bytes]) -> str:
+    """
+    Names without the UTF-8 flag should be encoded as CP437, but many Windows
+    programs use the ANSI code page instead. Prefer Windows-1252 if it decodes
+    all names with fewer unlikely characters.
+    """
+    try:
+        ansi_names = [raw.decode("cp1252") for raw in raw_names]
+    except UnicodeDecodeError:
+        return "cp437"
+    oem_names = [raw.decode("cp437") for raw in raw_names]
+    if sum(map(_unlikely_chars, ansi_names)) < sum(map(_unlikely_chars, oem_names)):
+        return "cp1252"
+    return "cp437"
+
+
 def list_zip(path: Path) -> list[ArchiveEntry]:
     """
     Lists the entries of a ZIP archive. Entry names are decoded as UTF-8 if the
-    archive flags them as such, otherwise as CP437 as defined by the ZIP spec.
+    archive flags them as such, otherwise as CP437 as defined by the ZIP spec or
+    as Windows-1252 if that fits better.
     Entry names are readable even if the archive is password protected.
     """
     with zipfile.ZipFile(path) as archive:
-        return [
-            ArchiveEntry(
-                name=info.filename,
-                size=None if info.is_dir() else info.file_size,
-                modified=_zip_timestamp(info.date_time),
-                is_dir=info.is_dir(),
-            )
-            for info in archive.infolist()
-        ]
+        infos = archive.infolist()
+
+    # zipfile decodes names without the UTF-8 flag as CP437, which maps every byte
+    legacy_names = {
+        info.filename: info.filename.encode("cp437")
+        for info in infos
+        if not info.flag_bits & 0x800 and not info.filename.isascii()
+    }
+    encoding = _legacy_zip_encoding(list(legacy_names.values()))
+
+    def name(info: zipfile.ZipInfo) -> str:
+        if encoding != "cp437" and info.filename in legacy_names:
+            return legacy_names[info.filename].decode(encoding)
+        return info.filename
+
+    return [
+        ArchiveEntry(
+            name=name(info),
+            size=None if info.is_dir() else info.file_size,
+            modified=_zip_timestamp(info.date_time),
+            is_dir=info.is_dir(),
+        )
+        for info in infos
+    ]
 
 
 def list_tar(path: Path) -> list[ArchiveEntry]:
