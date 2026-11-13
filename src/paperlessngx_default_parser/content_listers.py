@@ -81,6 +81,26 @@ def list_tar(path: Path) -> list[ArchiveEntry]:
         ]
 
 
+def format_size(size: int | None) -> str:
+    if size is None:
+        return ""
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KB", "MB", "GB"):
+        size /= 1024
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}"
+
+
+def describe(entries: list[ArchiveEntry]) -> str:
+    files = [entry for entry in entries if not entry.is_dir]
+    total_size = sum(entry.size or 0 for entry in files)
+    return (
+        f"{len(files)} files, {len(entries) - len(files)} directories, "
+        f"{format_size(total_size)} uncompressed"
+    )
+
+
 CONTENT_LISTERS: dict[str, ContentLister] = {
     "application/zip": ContentLister(".zip", list_zip),
     "application/x-zip-compressed": ContentLister(".zip", list_zip),

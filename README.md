@@ -27,7 +27,16 @@ If an archive can't be read (e.g. it is corrupt, or a .gz file contains a single
 Support for further formats can be added in `content_listers.py`: write a function returning the entries of a file and register it for the format's mime types in `CONTENT_LISTERS`.
 
 ## Prerequisites
-This parser requires Gotenberg to be configured for Paperless-ngx.
+By default this parser requires Gotenberg to be configured for Paperless-ngx. Alternatively the PDFs can be generated with fpdf2, which is part of the Paperless-ngx image, see `PAPERLESS_DEFAULT_PARSER_PDF_RENDERER`.
+
+## Configuration
+
+| Environment variable | Description | Default |
+|---|---|---|
+| `PAPERLESS_DEFAULT_PARSER_PDF_RENDERER` | `gotenberg` or `fpdf2`. Use `fpdf2` if Gotenberg isn't available, e.g. on systems where Chromium can't run. | `gotenberg` |
+| `PAPERLESS_DEFAULT_PARSER_LISTING_MAX_PAGES` | Maximum number of pages of the PDF listing the entries of an archive, `0` for no limit. The document's content always lists all entries. With Gotenberg the limit is approximate (40 entries per page). | `0` |
+
+The PDF lists at most 5000 entries of an archive.
 
 ## Installation
 
@@ -94,3 +103,12 @@ For example:
 - Add missing mime types using `add_missing_mime_types.sh` (see examples there)
 - Create your own custom container initialization script to add/modify mime types.
 - Use your own mime.types file and bind it to /etc/mime.types
+
+## Development
+
+The tests don't need Paperless-ngx:
+
+```
+pip install pytest fpdf2 pikepdf pypdf
+PYTHONPATH=src pytest
+```

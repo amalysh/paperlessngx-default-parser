@@ -20,6 +20,10 @@ license = "GPL-3.0-only"
 license-files = ["LICEN[CS]E*"]
 dependencies = ["chardet"]
 
+[dependency-groups]
+# fpdf2 and pikepdf are part of the Paperless-ngx image, the tests need them outside of it
+test = ["pytest", "fpdf2", "pikepdf", "pypdf"]
+
 [project.urls]
 Homepage = "https://github.com/toweosp/paperlessngx-default-parser"
 Issues = "https://github.com/toweosp/paperlessngx-default-parser/issues"

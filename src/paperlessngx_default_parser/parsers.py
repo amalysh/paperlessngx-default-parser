@@ -1,12 +1,14 @@
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from datetime import datetime
 from html import escape
+from itertools import chain
 from pathlib import Path
 from string import Template
 from types import TracebackType
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 from chardet.universaldetector import UniversalDetector
 from django.conf import settings
@@ -18,7 +20,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 from paperless.parsers import ParserContext
 
-from paperlessngx_default_parser.content_listers import CONTENT_LISTERS, ArchiveEntry
+from paperlessngx_default_parser.content_listers import (
+    CONTENT_LISTERS,
+    ArchiveEntry,
+    describe,
+    format_size,
+)
+
+if TYPE_CHECKING:
+    from paperlessngx_default_parser.pdf_renderer import FpdfRenderer
 
 
 class DefaultDocumentParser(DocumentParser):
@@ -65,6 +75,11 @@ class DefaultDocumentParser(DocumentParser):
     # Limits the rows of the generated PDF, the document's content always lists all entries
     max_rendered_entries = 5000
 
+    # Gotenberg can't tell how many rows fit on a page, so its page limit is approximate
+    gotenberg_rows_per_page = 40
+
+    pdf_renderers = ("gotenberg", "fpdf2")
+
     def __init__(self, logging_group: object = None) -> None:
         # sets self.log, which DocumentParser.__init__ would do
         self.renew_logging_group()
@@ -74,6 +89,26 @@ class DefaultDocumentParser(DocumentParser):
         )
         self._text: str = ""
         self._archive_path: Path | None = None
+
+        self.pdf_renderer = (
+            os.environ.get("PAPERLESS_DEFAULT_PARSER_PDF_RENDERER", "gotenberg")
+            .strip()
+            .lower()
+        )
+        if self.pdf_renderer not in self.pdf_renderers:
+            self.log.warning(
+                f"Unknown PAPERLESS_DEFAULT_PARSER_PDF_RENDERER {self.pdf_renderer!r}, using gotenberg"
+            )
+            self.pdf_renderer = "gotenberg"
+
+        max_pages = os.environ.get("PAPERLESS_DEFAULT_PARSER_LISTING_MAX_PAGES", "0")
+        try:
+            self.listing_max_pages = max(0, int(max_pages))
+        except ValueError:
+            self.log.warning(
+                f"Invalid PAPERLESS_DEFAULT_PARSER_LISTING_MAX_PAGES {max_pages!r}, not limiting pages"
+            )
+            self.listing_max_pages = 0
 
     def __enter__(self) -> Self:
         return self
@@ -176,8 +211,8 @@ class DefaultDocumentParser(DocumentParser):
                 self._text = "\n".join(
                     entry.name.replace("\x00", "") for entry in entries
                 )
-                self._archive_path = self.convert_to_pdf(
-                    self.render_listing(document_path.name, mime_type, entries)
+                self._archive_path = self.render_listing_pdf(
+                    document_path.name, mime_type, entries
                 )
                 return
 
@@ -213,22 +248,80 @@ class DefaultDocumentParser(DocumentParser):
                 # default values for self._text and pdf_output as already defined
                 pass
 
-        self._archive_path = self.convert_to_pdf(pdf_output)
+        if self.pdf_renderer == "fpdf2":
+            pdf_path = Path(self._tempdir) / "convert.pdf"
+            self._archive_path = self.render_with_fpdf(
+                lambda renderer: (
+                    renderer.text(pdf_path, self._text)
+                    if self._text
+                    else renderer.note(pdf_path, document_path.name, mime_type)
+                )
+            )
+        else:
+            self._archive_path = self.convert_to_pdf(pdf_output)
+
+    def render_listing_pdf(
+        self, file_name: str, mime_type: str, entries: list[ArchiveEntry]
+    ) -> Path:
+        if self.pdf_renderer == "fpdf2":
+            pdf_path = Path(self._tempdir) / "convert.pdf"
+            return self.render_with_fpdf(
+                lambda renderer: renderer.listing(
+                    pdf_path,
+                    file_name,
+                    mime_type,
+                    entries,
+                    max_pages=self.listing_max_pages,
+                    max_entries=self.max_rendered_entries,
+                )
+            )
+        return self.convert_to_pdf(self.render_listing(file_name, mime_type, entries))
+
+    def render_with_fpdf(self, render: Callable[["FpdfRenderer"], Path]) -> Path:
+        # imported here, so the Gotenberg renderer doesn't depend on fpdf2
+        from fpdf.enums import DocumentCompliance
+
+        from paperlessngx_default_parser.pdf_renderer import FpdfRenderer
+
+        compliance = {
+            OutputTypeChoices.PDF_A: DocumentCompliance.PDFA_2B,
+            OutputTypeChoices.PDF_A1: DocumentCompliance.PDFA_1B,
+            OutputTypeChoices.PDF_A2: DocumentCompliance.PDFA_2B,
+            OutputTypeChoices.PDF_A3: DocumentCompliance.PDFA_3B,
+        }.get(settings.OCR_OUTPUT_TYPE)
+
+        try:
+            renderer = FpdfRenderer(
+                font_path=self.find_font("LiberationSans-Regular.ttf"),
+                mono_font_path=self.find_font("LiberationMono-Regular.ttf"),
+                compliance=compliance,
+            )
+            return render(renderer)
+        except Exception as err:
+            raise ParseError(f"Error while rendering PDF with fpdf2: {err}") from err
+
+    @staticmethod
+    def find_font(file_name: str) -> Path:
+        # Pillow finds settings.THUMBNAIL_FONT_NAME by its name in the system fonts
+        # even if the path doesn't exist, fpdf2 needs the actual path
+        candidates = chain(
+            [Path(settings.THUMBNAIL_FONT_NAME).parent / file_name],
+            Path("/usr/share/fonts").rglob(file_name),
+        )
+        font = next((path for path in candidates if path.is_file()), None)
+        if font is None:
+            raise ParseError(f"Font {file_name} not found")
+        return font
 
     def render_listing(
         self, file_name: str, mime_type: str, entries: list[ArchiveEntry]
     ) -> str:
-        def format_size(size: int | None) -> str:
-            if size is None:
-                return ""
-            for unit in ("B", "KB", "MB", "GB"):
-                if size < 1024 or unit == "GB":
-                    return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-                size /= 1024
-
-        files = [entry for entry in entries if not entry.is_dir]
-        total_size = sum(entry.size or 0 for entry in files)
-        rendered = entries[: self.max_rendered_entries]
+        max_entries = self.max_rendered_entries
+        if self.listing_max_pages:
+            max_entries = min(
+                max_entries, self.listing_max_pages * self.gotenberg_rows_per_page
+            )
+        rendered = entries[:max_entries]
 
         rows = "\n".join(
             "<tr><td>{}</td><td class='num'>{}</td><td>{}</td></tr>".format(
@@ -256,7 +349,7 @@ class DefaultDocumentParser(DocumentParser):
     <body>
     <b>original file name:</b> {escape(file_name)}<br>
     <b>mime type:</b> {escape(mime_type)}<br>
-    <b>entries:</b> {len(files)} files, {len(entries) - len(files)} directories, {format_size(total_size)} uncompressed
+    <b>entries:</b> {describe(entries)}
     <p>
     <table>
     <tr><th>name</th><th>size</th><th>modified</th></tr>
